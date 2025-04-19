@@ -735,11 +735,8 @@ async def view_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def build_application() -> Application:
     app = ApplicationBuilder().token(TOKEN).build()
-
-    # 👇 Важно: явно включаем job_queue
-    app.job_queue = app.job_queue or app.job_queue
-
     return app
+
 
 
     # === Команды ===
