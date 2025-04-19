@@ -1,7 +1,24 @@
 # === 🧱 БЛОК 1: Импорты, Конфигурация, База Данных ===
 
 import logging
-import sqlite3
+import sqlite3 
+conn = sqlite3.connect("wishlist.db")  # если у тебя БД по-другому называется — впиши нужное имя
+cursor = conn.cursor()
+
+try:
+    cursor.execute("ALTER TABLE reminders ADD COLUMN asked INTEGER DEFAULT 0")
+    print("✅ Колонка 'asked' добавлена")
+except sqlite3.OperationalError as e:
+    if "duplicate column name" in str(e):
+        print("ℹ️ Колонка 'asked' уже существует — всё ок")
+    elif "no such table" in str(e):
+        print("❌ Нет таблицы reminders — проверь миграции")
+    else:
+        raise
+
+conn.commit()
+conn.close()
+
 from datetime import datetime, timedelta
 from dateutil import parser as dateparser  # для гибкого парсинга дат
 
@@ -11,7 +28,9 @@ from telegram import (
     InlineKeyboardMarkup,
     InputMediaPhoto
 )
+
 from telegram.constants import ParseMode
+
 from telegram.ext import (
     ApplicationBuilder,
     Application,
@@ -23,7 +42,6 @@ from telegram.ext import (
     ConversationHandler,
     JobQueue
 )
-
 # === Токен и имя администратора ===
 TOKEN = "7834717272:AAET3xhf3VkMV6PqQ2ClydpKEQDyD-PYt4I"
 ADMIN_USERNAME = "prakhova"
@@ -82,6 +100,9 @@ conn.commit()
 
 # Главное меню
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    print(f"🔵 start() triggered by user: {update.effective_user.username}")
+    msg = update.message or update.callback_query.message  # универсальный способ ответа
+
     keyboard = [
         [InlineKeyboardButton("$20", callback_data="price:20")],
         [InlineKeyboardButton("$50", callback_data="price:50")],
@@ -97,7 +118,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
+    await msg.reply_text(
         "🎀 <b>Hi! This is Adriana Prakhova’s wishlist!</b> 🎀\n"
         "Want to make me smile with a gift 🎁?\n"
         "Choose your budget below 💸👇",
@@ -105,15 +126,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML
     )
 
+
 # Обработка кнопки "⬅️ Вернуться в меню"
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await start(update.callback_query, context)
+    await start(update, context)
 
-# Обработка кнопки "⬅️ Вернуться к бюджету"
 async def return_to_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
-    await start(update.callback_query, context)
+    await start(update, context)
 
 # === 🔚 КОНЕЦ БЛОКА 2 ===
 # === 🧱 БЛОК 3: Добавление товара — Команда /add ===
@@ -444,8 +465,10 @@ async def cancel_booking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.reply_text("✅ Booking canceled.")
 
 # 🔁 Периодическая проверка напоминаний
-async def check_reminders(app: Application):
+async def check_reminders(context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(timezone.utc).isoformat()
+    app = context.bot
+
     c.execute("SELECT id, user_id, item_id FROM reminders WHERE remind_at <= ? AND asked = 0", (now,))
     reminders = c.fetchall()
 
@@ -453,12 +476,13 @@ async def check_reminders(app: Application):
         c.execute("SELECT title FROM items WHERE id = ?", (item_id,))
         item = c.fetchone()
         if item:
-            await app.bot.send_message(user_id, f"⏰ Reminder! Did you buy: {item[0]}?", reply_markup=InlineKeyboardMarkup([
+            await app.send_message(user_id, f"⏰ Reminder! Did you buy: {item[0]}?", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Yes", callback_data=f"confirm:yes:{item_id}:{reminder_id}")],
                 [InlineKeyboardButton("❌ No", callback_data=f"confirm:no:{item_id}:{reminder_id}")]
             ]))
             c.execute("UPDATE reminders SET asked = 1 WHERE id = ?", (reminder_id,))
     conn.commit()
+
 
 # ✅ Обработка ответа на "Купили ли вы товар?"
 async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -480,7 +504,8 @@ async def confirm_purchase(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.reply_text(msg)
 
 # ⏳ Автоснятие брони через 12ч без ответа
-async def auto_cancel_unconfirmed(app: Application):
+async def auto_cancel_unconfirmed(context: ContextTypes.DEFAULT_TYPE):
+    app = context.application
     check_time = (datetime.utcnow() - timedelta(hours=12)).isoformat()
     c.execute("SELECT item_id FROM reminders WHERE asked = 1 AND confirmed IS NULL AND remind_at <= ?", (check_time,))
     items_to_cancel = c.fetchall()
@@ -711,6 +736,45 @@ async def view_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_application() -> Application:
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # 👇 Важно: явно включаем job_queue
+    app.job_queue = app.job_queue or app.job_queue
+
+    return app
+
+
+    # === Команды ===
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add_start))
+    app.add_handler(CommandHandler("edit", edit_start))
+    app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("logs", view_logs))
+
+    # === Conversation: /add ===
+    app.add_handler(add_conv)
+
+    # === Conversation: /edit ===
+    app.add_handler(edit_conv)
+
+    # === Callback-и ===
+    app.add_handler(CallbackQueryHandler(price_filter, pattern="^price:"))
+    app.add_handler(CallbackQueryHandler(manual_input, pattern="^manual_input$"))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^\d+$"), handle_manual_budget))
+
+    app.add_handler(CallbackQueryHandler(book_item, pattern="^bookanon:|^book:"))
+    app.add_handler(CallbackQueryHandler(set_reminder, pattern="^remind:"))
+    app.add_handler(CallbackQueryHandler(cancel_booking, pattern="^cancel:"))
+    app.add_handler(CallbackQueryHandler(back_to_menu, pattern="^back_to_menu$"))
+    app.add_handler(CallbackQueryHandler(return_to_budget, pattern="^back_to_budget$"))
+
+    app.add_handler(CallbackQueryHandler(support_menu, pattern="^support$"))
+    app.add_handler(CallbackQueryHandler(donate_usdt, pattern="^donate_usdt$"))
+    app.add_handler(CallbackQueryHandler(donate_usdc, pattern="^donate_usdc$"))
+
+    app.add_handler(CallbackQueryHandler(admin_item_details, pattern="^details:"))
+    app.add_handler(CallbackQueryHandler(confirm_purchase, pattern="^confirm:"))
+
+    return app  # ← теперь правильно
+
     # === Команды ===
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("add", add_start))
@@ -746,7 +810,7 @@ def build_application() -> Application:
 
 
 # ✅ Инициализация задач
-async def initialize_jobs(application: Application):
+async def initialize_jobs(application):
     application.job_queue.run_repeating(check_reminders, interval=60)
     application.job_queue.run_repeating(auto_cancel_unconfirmed, interval=3600)
 
@@ -783,17 +847,22 @@ async def auto_cancel_unconfirmed(context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
 
 
-# === 🚀 Запуск бота (совместимо с Windows, PTB 20+) ===
+# === 🚀 Запуск бота ===
+
+import asyncio
+
+async def main():
+    app = build_application()
+    await initialize_jobs(app)
+    print("✅ Бот запущен!")
+    await app.run_polling()
+
+import nest_asyncio
+nest_asyncio.apply()
+
 if __name__ == "__main__":
     import asyncio
-
-    async def main():
-        app = build_application()
-        await initialize_jobs(app)
-        print("🚀 Bot is running... Press Ctrl+C to stop.")
-        await app.run_polling()
-
-    asyncio.run(main())
+    asyncio.get_event_loop().run_until_complete(main())
 
 # === 🔚 КОНЕЦ БЛОКА 9 ===
 
